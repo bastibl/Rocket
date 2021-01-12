@@ -739,7 +739,7 @@ pub struct Connection<K, C: Poolable> {
 async fn run_blocking<F, R>(job: F) -> R
     where F: FnOnce() -> R + Send + 'static, R: Send + 'static,
 {
-    match tokio::task::spawn_blocking(job).await {
+    match smol::spawn_blocking(job).await {
         Ok(ret) => ret,
         Err(e) => match e.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),

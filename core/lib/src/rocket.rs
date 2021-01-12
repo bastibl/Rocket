@@ -521,45 +521,50 @@ impl Rocket {
         // If `ctrl-c` shutdown is enabled, we `select` on `the ctrl-c` signal
         // and server. Otherwise, we only wait on the `server`, hence `pending`.
         let shutdown_handle = self.shutdown_handle.clone();
-        let shutdown_signal = match self.config.ctrlc {
-            true => tokio::signal::ctrl_c().boxed(),
-            false => futures::future::pending().boxed(),
-        };
+        // let shutdown_signal = match self.config.ctrlc {
+        //     true => tokio::signal::ctrl_c().boxed(),
+        //     false => futures::future::pending().boxed(),
+        // };
+        let shutdown_signal = futures::future::pending::<()>().boxed();
 
-        #[cfg(feature = "tls")]
-        let server = {
-            use crate::http::tls::bind_tls;
+        // #[cfg(feature = "tls")]
+        // let server = {
+        //     use crate::http::tls::bind_tls;
 
-            if let Some(tls_config) = &self.config.tls {
-                let (certs, key) = tls_config.to_readers().map_err(ErrorKind::Io)?;
-                let l = bind_tls(addr, certs, key).await.map_err(ErrorKind::Bind)?;
-                self.listen_on(l).boxed()
-            } else {
-                let l = bind_tcp(addr).await.map_err(ErrorKind::Bind)?;
-                self.listen_on(l).boxed()
-            }
-        };
+        //     if let Some(tls_config) = &self.config.tls {
+        //         let (certs, key) = tls_config.to_readers().map_err(ErrorKind::Io)?;
+        //         let l = bind_tls(addr, certs, key).await.map_err(ErrorKind::Bind)?;
+        //         self.listen_on(l).boxed()
+        //     } else {
+        //         let l = bind_tcp(addr).await.map_err(ErrorKind::Bind)?;
+        //         self.listen_on(l).boxed()
+        //     }
+        // };
 
-        #[cfg(not(feature = "tls"))]
+        // #[cfg(not(feature = "tls"))]
         let server = {
             let l = bind_tcp(addr).await.map_err(ErrorKind::Bind)?;
             self.listen_on(l).boxed()
         };
 
-        match futures::future::select(shutdown_signal, server).await {
-            Either::Left((Ok(()), server)) => {
-                // Ctrl-was pressed. Signal shutdown, wait for the server.
-                shutdown_handle.shutdown();
-                server.await
-            }
-            Either::Left((Err(err), server)) => {
-                // Error setting up ctrl-c signal. Let the user know.
-                warn!("Failed to enable `ctrl-c` graceful signal shutdown.");
-                info_!("Error: {}", err);
-                server.await
-            }
-            // Server shut down before Ctrl-C; return the result.
-            Either::Right((result, _)) => result,
-        }
+        server.await;
+        Ok(())
+
+        // match futures::future::select(shutdown_signal, server).await {
+        //     Either::Left((Ok(()), server)) => {
+        //         // Ctrl-was pressed. Signal shutdown, wait for the server.
+        //         shutdown_handle.shutdown();
+        //         server.await
+        //     }
+        //     Either::Left((Err(err), server)) => {
+        //         // Error setting up ctrl-c signal. Let the user know.
+        //         warn!("Failed to enable `ctrl-c` graceful signal shutdown.");
+        //         info_!("Error: {}", err);
+        //         server.await
+        //     }
+        //     // Server shut down before Ctrl-C; return the result.
+        //     Either::Right((result, _)) => result,
+        // }
     }
 }
+

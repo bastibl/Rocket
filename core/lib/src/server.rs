@@ -20,6 +20,17 @@ use crate::http::{Method, Status, Header, hyper};
 use crate::http::private::{Listener, Connection, Incoming};
 use crate::http::uri::Origin;
 
+/// Spawns futures.
+#[derive(Clone)]
+struct SmolExecutor;
+
+impl<F: Future + Send + 'static> ::hyper::rt::Executor<F> for SmolExecutor {
+    fn execute(&self, fut: F) {
+        println!("smol spawning");
+        smol::spawn(async { drop(fut.await) }).detach();
+    }
+}
+
 // A token returned to force the execution of one method before another.
 pub(crate) struct Token;
 
@@ -37,7 +48,7 @@ async fn hyper_service_fn(
     // sends the response metadata (and a body channel) prior.
     let (tx, rx) = oneshot::channel();
 
-    tokio::spawn(async move {
+    smol::spawn(async move {
         // Get all of the information from Hyper.
         let (h_parts, h_body) = hyp_req.into_parts();
 
@@ -67,7 +78,7 @@ async fn hyper_service_fn(
         let token = rocket.preprocess_request(&mut req, &mut data).await;
         let r = rocket.dispatch(token, &mut req, data).await;
         rocket.send_response(r, tx).await;
-    });
+    }).detach();
 
     // Receive the response written to `tx` by the task above.
     rx.await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))
@@ -380,7 +391,9 @@ impl Rocket {
         });
 
         // NOTE: `hyper` uses `tokio::spawn()` as the default executor.
+        println!("creating hyper server");
         hyper::Server::builder(Incoming::from_listener(listener))
+            .executor(SmolExecutor)
             .http1_keepalive(http1_keepalive)
             .http2_keep_alive_interval(http2_keep_alive)
             .serve(service)

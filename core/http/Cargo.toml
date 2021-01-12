@@ -22,7 +22,7 @@ private-cookies = ["cookie/private", "cookie/key-expansion"]
 [dependencies]
 smallvec = "1.0"
 percent-encoding = "2"
-hyper = { version = "0.13.0", default-features = false, features = ["runtime"] }
+hyper = { version = "0.13.0" }
 http = "0.2"
 mime = "0.3.13"
 time = "0.2.11"
@@ -37,6 +37,7 @@ uncased = "0.9"
 parking_lot = "0.11"
 either = "1"
 pear = "0.2"
+smol = "1.2.5"
 
 [dependencies.cookie]
 git = "https://github.com/SergioBenitez/cookie-rs.git"

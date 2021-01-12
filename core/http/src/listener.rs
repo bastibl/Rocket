@@ -1,6 +1,6 @@
 use std::fmt;
 use std::future::Future;
-use std::io;
+// use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -11,8 +11,10 @@ use hyper::server::accept::Accept;
 use log::{debug, error};
 
 use tokio::time::Delay;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream};
+// use tokio::io::{AsyncRead, AsyncWrite};
+// use tokio::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use smol::{future, prelude::*, Async};
 
 // TODO.async: 'Listener' and 'Connection' provide common enough functionality
 // that they could be introduced in upstream libraries.
@@ -24,11 +26,11 @@ pub trait Listener {
     fn local_addr(&self) -> Option<SocketAddr>;
 
     /// Try to accept an incoming Connection if ready
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Connection>>;
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<Self::Connection>>;
 }
 
 /// A 'Connection' represents an open connection to a client
-pub trait Connection: AsyncRead + AsyncWrite {
+pub trait Connection: tokio::io::AsyncRead + tokio::io::AsyncWrite {
     fn remote_addr(&self) -> Option<SocketAddr>;
 }
 
@@ -72,7 +74,7 @@ impl<L: Listener> Incoming<L> {
         self.sleep_on_errors = val;
     }
 
-    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<L::Connection>> {
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<L::Connection>> {
         // Check if a previous delay is active that was set by IO errors.
         if let Some(ref mut delay) = self.pending_error_delay {
             match Pin::new(delay).poll(cx) {
@@ -123,12 +125,12 @@ impl<L: Listener> Incoming<L> {
 
 impl<L: Listener + Unpin> Accept for Incoming<L> {
     type Conn = L::Connection;
-    type Error = io::Error;
+    type Error = std::io::Error;
 
     fn poll_accept(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>
-    ) -> Poll<Option<io::Result<Self::Conn>>> {
+    ) -> Poll<Option<std::io::Result<Self::Conn>>> {
         self.poll_next(cx).map(Some)
     }
 }
@@ -140,11 +142,11 @@ impl<L: Listener + Unpin> Accept for Incoming<L> {
 /// All other errors will incur a delay before next `accept()` is performed.
 /// The delay is useful to handle resource exhaustion errors like ENFILE
 /// and EMFILE. Otherwise, could enter into tight loop.
-fn is_connection_error(e: &io::Error) -> bool {
+fn is_connection_error(e: &std::io::Error) -> bool {
     match e.kind() {
-        io::ErrorKind::ConnectionRefused |
-        io::ErrorKind::ConnectionAborted |
-        io::ErrorKind::ConnectionReset => true,
+        std::io::ErrorKind::ConnectionRefused |
+        std::io::ErrorKind::ConnectionAborted |
+        std::io::ErrorKind::ConnectionReset => true,
         _ => false,
     }
 }
@@ -157,24 +159,68 @@ impl<L: fmt::Debug> fmt::Debug for Incoming<L> {
     }
 }
 
-pub async fn bind_tcp(address: SocketAddr) -> io::Result<TcpListener> {
-    Ok(TcpListener::bind(address).await?)
+pub async fn bind_tcp(address: SocketAddr) -> std::io::Result<SmolListener> {
+    Ok(SmolListener { inner: Async::<TcpListener>::bind(address)? })
 }
 
-impl Listener for TcpListener {
-    type Connection = TcpStream;
+impl Listener for SmolListener {
+    type Connection = SmolStream;
 
     fn local_addr(&self) -> Option<SocketAddr> {
-        self.local_addr().ok()
+        self.inner.get_ref().local_addr().ok()
     }
 
-    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Connection>> {
-        self.poll_accept(cx).map_ok(|(stream, _addr)| stream)
+    fn poll_accept(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<Self::Connection>> {
+
+        let incoming = self.inner.incoming();
+        smol::pin!(incoming);
+        let stream = smol::ready!(incoming.poll_next(cx)).unwrap()?;
+
+        Poll::Ready(Ok(SmolStream{ inner: stream }))
+        // self.inner.poll_accept(cx).map_ok(|(stream, _addr)| stream)
     }
 }
 
-impl Connection for TcpStream {
+pub struct SmolListener {
+    inner: Async<TcpListener>,
+}
+
+pub struct SmolStream {
+    inner: Async<TcpStream>,
+}
+
+impl Connection for SmolStream {
     fn remote_addr(&self) -> Option<SocketAddr> {
-        self.peer_addr().ok()
+        self.inner.get_ref().peer_addr().ok()
+    }
+}
+
+
+impl tokio::io::AsyncRead for SmolStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for SmolStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.inner.get_ref().shutdown(Shutdown::Write)?;
+        Poll::Ready(Ok(()))
     }
 }
