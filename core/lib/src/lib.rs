@@ -149,6 +149,7 @@ pub use crate::router::Route;
 pub use crate::request::{Request, State};
 pub use crate::rocket::Rocket;
 pub use crate::shutdown::Shutdown;
+pub use crate::server::SpawnBoxedFuture;
 
 /// Alias to [`Rocket::ignite()`] Creates a new instance of `Rocket`.
 pub fn ignite() -> Rocket {

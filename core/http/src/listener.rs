@@ -14,7 +14,7 @@ use tokio::time::Delay;
 // use tokio::io::{AsyncRead, AsyncWrite};
 // use tokio::net::{TcpListener, TcpStream};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use smol::{future, prelude::*, Async};
+use smol::{prelude::*, Async};
 
 // TODO.async: 'Listener' and 'Connection' provide common enough functionality
 // that they could be introduced in upstream libraries.
@@ -189,6 +189,12 @@ pub struct SmolStream {
     inner: Async<TcpStream>,
 }
 
+impl Connection for tokio::net::TcpStream {
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        self.peer_addr().ok()
+    }
+}
+
 impl Connection for SmolStream {
     fn remote_addr(&self) -> Option<SocketAddr> {
         self.inner.get_ref().peer_addr().ok()
@@ -219,7 +225,7 @@ impl tokio::io::AsyncWrite for SmolStream {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         self.inner.get_ref().shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
     }

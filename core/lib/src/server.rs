@@ -1,10 +1,13 @@
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::pin::Pin;
 
 use futures::stream::StreamExt;
-use futures::future::{Future, BoxFuture};
+use futures::future::{Future, BoxFuture, FutureExt};
 use tokio::sync::oneshot;
 use yansi::Paint;
+
+use rocket_http::hyper::Executor;
 
 use crate::Rocket;
 use crate::handler;
@@ -22,13 +25,18 @@ use crate::http::uri::Origin;
 
 /// Spawns futures.
 #[derive(Clone)]
-struct SmolExecutor;
+struct SmolExecutor {
+    inner: Arc<Mutex<Box<dyn SpawnBoxedFuture>>>,
+}
 
-impl<F: Future + Send + 'static> ::hyper::rt::Executor<F> for SmolExecutor {
+impl<F: Future<Output=()> + Send + 'static> ::hyper::rt::Executor<F> for SmolExecutor {
     fn execute(&self, fut: F) {
-        println!("smol spawning");
-        smol::spawn(async { drop(fut.await) }).detach();
+        self.inner.lock().unwrap().spawn_boxed( async { drop(fut.await) }.boxed());
     }
+}
+
+pub trait SpawnBoxedFuture : Send {
+    fn spawn_boxed(&self, fut: Pin<Box<dyn Future<Output=()> + Send + 'static>>);
 }
 
 // A token returned to force the execution of one method before another.
@@ -42,13 +50,15 @@ async fn hyper_service_fn(
     rocket: Arc<Rocket>,
     h_addr: std::net::SocketAddr,
     hyp_req: hyper::Request<hyper::Body>,
+    sched: SmolExecutor,
 ) -> Result<hyper::Response<hyper::Body>, io::Error> {
     // This future must return a hyper::Response, but the response body might
     // borrow from the request. Instead, write the body in another future that
     // sends the response metadata (and a body channel) prior.
     let (tx, rx) = oneshot::channel();
 
-    smol::spawn(async move {
+    // println!("=================== NOT CALLED?!?!? ===============");
+    sched.execute(async move {
         // Get all of the information from Hyper.
         let (h_parts, h_body) = hyp_req.into_parts();
 
@@ -78,7 +88,7 @@ async fn hyper_service_fn(
         let token = rocket.preprocess_request(&mut req, &mut data).await;
         let r = rocket.dispatch(token, &mut req, data).await;
         rocket.send_response(r, tx).await;
-    }).detach();
+    });
 
     // Receive the response written to `tx` by the task above.
     rx.await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))
@@ -342,7 +352,7 @@ impl Rocket {
     }
 
     // TODO.async: Solidify the Listener APIs and make this function public
-    pub(crate) async fn listen_on<L>(mut self, listener: L) -> Result<(), Error>
+    pub(crate) async fn listen_on<L>(mut self, listener: L, sched: Box<dyn SpawnBoxedFuture>) -> Result<(), Error>
         where L: Listener + Send + Unpin + 'static,
               <L as Listener>::Connection: Send + Unpin + 'static,
     {
@@ -380,12 +390,16 @@ impl Rocket {
             .expect("shutdown receiver has already been used");
 
         let rocket = Arc::new(self);
+        let my_executor = SmolExecutor { inner: Arc::new(Mutex::new(sched)) };
+        let my_ex = my_executor.clone();
+
         let service = hyper::make_service_fn(move |conn: &<L as Listener>::Connection| {
             let rocket = rocket.clone();
             let remote = conn.remote_addr().unwrap_or_else(|| ([0, 0, 0, 0], 0).into());
+            let my_e = my_ex.clone();
             async move {
                 Ok::<_, std::convert::Infallible>(hyper::service_fn(move |req| {
-                    hyper_service_fn(rocket.clone(), remote, req)
+                    hyper_service_fn(rocket.clone(), remote, req, my_e.clone())
                 }))
             }
         });
@@ -393,7 +407,7 @@ impl Rocket {
         // NOTE: `hyper` uses `tokio::spawn()` as the default executor.
         println!("creating hyper server");
         hyper::Server::builder(Incoming::from_listener(listener))
-            .executor(SmolExecutor)
+            .executor(my_executor)
             .http1_keepalive(http1_keepalive)
             .http2_keep_alive_interval(http2_keep_alive)
             .serve(service)

@@ -15,6 +15,7 @@ use crate::logger::PaintExt;
 use crate::shutdown::Shutdown;
 use crate::http::uri::Origin;
 use crate::error::{Error, ErrorKind};
+use crate::server::SpawnBoxedFuture;
 
 /// The main `Rocket` type: used to mount routes and catchers and launch the
 /// application.
@@ -506,9 +507,8 @@ impl Rocket {
     /// # }
     /// }
     /// ```
-    pub async fn launch(mut self) -> Result<(), Error> {
+    pub async fn launch(mut self, sched: Box<dyn SpawnBoxedFuture>) -> Result<(), Error> {
         use std::net::ToSocketAddrs;
-        use futures::future::Either;
         use crate::http::private::bind_tcp;
 
         self.prelaunch_check().await?;
@@ -520,12 +520,12 @@ impl Rocket {
 
         // If `ctrl-c` shutdown is enabled, we `select` on `the ctrl-c` signal
         // and server. Otherwise, we only wait on the `server`, hence `pending`.
-        let shutdown_handle = self.shutdown_handle.clone();
+        // let shutdown_handle = self.shutdown_handle.clone();
         // let shutdown_signal = match self.config.ctrlc {
         //     true => tokio::signal::ctrl_c().boxed(),
         //     false => futures::future::pending().boxed(),
         // };
-        let shutdown_signal = futures::future::pending::<()>().boxed();
+        // let shutdown_signal = futures::future::pending::<()>().boxed();
 
         // #[cfg(feature = "tls")]
         // let server = {
@@ -544,11 +544,10 @@ impl Rocket {
         // #[cfg(not(feature = "tls"))]
         let server = {
             let l = bind_tcp(addr).await.map_err(ErrorKind::Bind)?;
-            self.listen_on(l).boxed()
+            self.listen_on(l, sched).boxed()
         };
 
-        server.await;
-        Ok(())
+        server.await
 
         // match futures::future::select(shutdown_signal, server).await {
         //     Either::Left((Ok(()), server)) => {
